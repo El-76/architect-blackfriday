@@ -1,0 +1,287 @@
+name: mongo-sharding
+
+services:
+  config_server1:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: config_server1
+    restart: always
+    networks:
+      app-network:
+        ipv4_address: 173.17.0.10
+    volumes:
+      - config1-data:/data/db
+    command:
+      [
+        "--configsvr",
+        "--replSet",
+        "config_server",
+        "--bind_ip_all",
+     ] 
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--port", "27019" ]
+      interval: 5s
+      start_period: 10s
+
+  config_server2:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: config_server2
+    restart: always
+    networks:
+      app-network:
+        ipv4_address: 173.17.0.15
+    volumes:
+      - config2-data:/data/db
+    command:
+      [
+        "--configsvr",
+        "--replSet",
+        "config_server",
+        "--bind_ip_all",
+      ] 
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--port", "27019" ]
+      interval: 5s
+      start_period: 10s
+
+  config_server3:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: config_server3
+    restart: always
+    networks:
+      app-network:
+        ipv4_address: 173.17.0.16
+    volumes:
+      - config3-data:/data/db
+    command:
+      [
+        "--configsvr",
+        "--replSet",
+        "config_server",
+        "--bind_ip_all",
+      ] 
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--port", "27019" ]
+      interval: 5s
+      start_period: 10s
+
+  # The temporary setup service that handles initialization
+  init_mongo_cluster:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: init_cluster
+    entrypoint: >
+      bash -c "
+
+      echo 'Waiting for the config server 1 to respond...';
+      until mongosh --host config_server1 --port 27019 --eval 'db.adminCommand({ping:1})' &>/dev/null; do
+        sleep 2;
+      done;
+      echo 'Waiting for the config server 2 to respond...';
+      until mongosh --host config_server2 --port 27019 --eval 'db.adminCommand({ping:1})' &>/dev/null; do
+        sleep 2;
+      done;
+       echo 'Waiting for the config server 2 to respond...';
+      until mongosh --host config_server2 --port 27019 --eval 'db.adminCommand({ping:1})' &>/dev/null; do
+        sleep 2;
+      done;
+      echo 'Initializing the replica set...';
+      mongosh --host config_server1 --port 27019 --eval '
+        rs.initiate({
+          _id: \"config_server\",
+          configsvr: true,
+          version: 1,
+          members: [
+            { _id: 0, host: \"config_server1:27019\" },
+            { _id: 1, host: \"config_server2:27019\" },
+            { _id: 2, host: \"config_server3:27019\" }
+          ]
+        })
+      ';
+      echo 'Replica set configuration completed successfully!';
+
+      echo 'Waiting for the shard1 server to respond...';
+      until mongosh --host shard1 --port 27018 --eval 'db.adminCommand({ping:1})' &>/dev/null; do
+        sleep 2;
+      done;
+      echo 'Initializing shard1...';
+      mongosh --host shard1 --port 27018 --eval '
+        rs.initiate({
+          _id : \"shard1\",
+          members: [
+            { _id : 0, host : \"shard1:27018\" }
+          ]
+        })
+      ';
+      echo 'shard1 configuration completed successfully!';
+
+      echo 'Waiting for the shard2 server to respond...';
+      until mongosh --host shard2 --port 27018 --eval 'db.adminCommand({ping:1})' &>/dev/null; do
+        sleep 2;
+      done;
+      echo 'Initializing shard2...';
+      mongosh --host shard2 --port 27018 --eval '
+        rs.initiate({
+          _id : \"shard2\",
+          members: [
+            { _id : 0, host : \"shard2:27018\" }
+          ]
+        })
+      ';
+      echo 'shard2 configuration completed successfully!';
+
+      echo 'Waiting for the router server 1 to respond...';
+      until mongosh --host mongos_router1 --port 27017 --eval 'db.adminCommand({ping:1})' &>/dev/null; do
+        sleep 2;
+      done;
+      echo 'Initializing shards...';
+      mongosh --host mongos_router1 --port 27017 --eval '
+        sh.addShard(\"shard1/shard1:27018\");
+        sh.addShard(\"shard2/shard2:27018\");
+
+        sh.enableSharding(\"somedb\");
+        sh.shardCollection(\"somedb.helloDoc\", { \"name\" : \"hashed\" } )
+      ';
+      echo 'shards configuration completed successfully!';
+
+      echo 'Waiting for the router server 2 to respond...';
+      until mongosh --host mongos_router2 --port 27017 --eval 'db.adminCommand({ping:1})' &>/dev/null; do
+        sleep 2;
+      done;
+      echo 'Cluster configuration completed successfully!';
+
+      touch /var/run/cluster-init
+
+      while true; do
+        sleep 86400
+      done
+
+      "
+    networks:
+      app-network:
+        ipv4_address: 173.17.0.12
+    healthcheck:
+      test: [ "CMD", "test", "-f", "/var/run/cluster-init" ]
+      interval: 5s
+      start_period: 10s
+      retries: 500
+
+  shard1:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: shard1
+    restart: always
+    networks:
+      app-network:
+        ipv4_address: 173.17.0.9
+    volumes:
+      - shard1-data:/data/db
+    command:
+      [
+        "--shardsvr",
+        "--replSet",
+        "shard1",
+        "--bind_ip_all",
+      ]
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--port", "27018" ]
+      interval: 5s
+      start_period: 10s
+
+  shard2:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: shard2
+    restart: always
+    networks:
+      app-network:
+        ipv4_address: 173.17.0.8
+    volumes:
+      - shard2-data:/data/db
+    command:
+      [
+        "--shardsvr",
+        "--replSet",
+        "shard2",
+        "--bind_ip_all",
+      ]
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--port", "27018" ]
+      interval: 5s
+      start_period: 10s
+  
+  mongos_router1:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: mongos_router1
+    restart: always
+    networks:
+      app-network:
+        ipv4_address: 173.17.0.7
+    command:
+      [
+        "mongos",
+        "--configdb", 
+        "config_server/config_server1:27019,config_server2:27019,config_server3:27019",
+        "--bind_ip_all",
+      ]
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--port", "27017" ]
+      interval: 5s
+      start_period: 10s
+      retries: 500
+
+  mongos_router2:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: mongos_router2
+    restart: always
+    networks:
+      app-network:
+        ipv4_address: 173.17.0.17
+    command:
+      [
+        "mongos",
+        "--configdb", 
+        "config_server/config_server1:27019,config_server2:27019,config_server3:27019",
+        "--bind_ip_all",
+      ]
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--port", "27017" ]
+      interval: 5s
+      start_period: 10s
+      retries: 500
+
+  pymongo_api:
+    container_name: pymongo_api
+    build: 
+      context: api_app
+      dockerfile: Dockerfile
+    depends_on:
+      mongos_router1:
+        condition: service_healthy
+      mongos_router2:
+        condition: service_healthy
+      init_mongo_cluster:
+        condition: service_healthy
+      
+    ports:
+      - 8080:8080
+    environment:
+      MONGODB_URL: "mongodb://mongos_router1:27017,mongos_router2:27017"
+      MONGODB_DATABASE_NAME: "somedb"
+    networks:
+      app-network:
+        ipv4_address: 173.17.0.11
+
+
+networks:
+  app-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 173.17.0.0/16
+
+volumes:
+  config1-data:
+  config2-data:
+  config3-data:
+  shard1-data:
+  shard2-data:
+
+
